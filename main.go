@@ -17,7 +17,21 @@ type ConnectionInfo struct {
     CipherSuite   string `json:"cipher_suite"`
 }
 
-func getMSS(conn *net.TCPConn) int {
+func getMSS(network string, address string) int {
+    // Create a temporary connection to get MSS
+    tcpAddr, err := net.ResolveTCPAddr(network, address)
+    if err != nil {
+        log.Printf("Error resolving address: %v", err)
+        return 0
+    }
+
+    conn, err := net.DialTCP(network, nil, tcpAddr)
+    if err != nil {
+        log.Printf("Error dialing: %v", err)
+        return 0
+    }
+    defer conn.Close()
+
     raw, err := conn.SyscallConn()
     if err != nil {
         log.Printf("Error getting syscall conn: %v", err)
@@ -32,23 +46,21 @@ func getMSS(conn *net.TCPConn) int {
             mss = 0
         }
     })
+
+    log.Printf("MSS for %s: %d", address, mss)
     return mss
 }
 
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
-    var incomingMSS int
-
-    // Try to get the underlying TCP connection
-    hj, ok := w.(http.Hijacker)
-    if ok {
-        conn, _, err := hj.Hijack()
-        if err == nil {
-            if tcpConn, ok := conn.(*net.TCPConn); ok {
-                incomingMSS = getMSS(tcpConn)
-                // Don't close the connection here as we need it for the response
-            }
-        }
+    // Get the remote host without port
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil {
+        log.Printf("Error splitting host port: %v", err)
+        host = r.RemoteAddr
     }
+
+    // Get MSS using a separate connection
+    incomingMSS := getMSS("tcp", host+":443")
 
     // Get TLS version as string
     tlsVersionStr := "Unknown"
@@ -72,9 +84,6 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
         CipherSuite:   tls.CipherSuiteName(r.TLS.CipherSuite),
     }
 
-    // Log for debugging
-    log.Printf("Connection from %s, MSS: %d", r.RemoteAddr, incomingMSS)
-
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(info)
 }
@@ -88,16 +97,10 @@ func main() {
         port = "8443"
     }
 
-    server := &http.Server{
-        Addr: ":" + port,
-        Handler: http.HandlerFunc(connectionHandler),
-        TLSConfig: &tls.Config{
-            MinVersion: tls.VersionTLS12,
-        },
-    }
-
+    http.HandleFunc("/", connectionHandler)
+    
     log.Printf("Starting HTTPS server on port %s", port)
-    if err := server.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key"); err != nil {
+    if err := http.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key", nil); err != nil {
         log.Fatal(err)
     }
 }
