@@ -3,7 +3,6 @@ package main
 import (
     "crypto/tls"
     "encoding/json"
-    "fmt"
     "log"
     "net"
     "net/http"
@@ -54,9 +53,15 @@ func getMSSandMTU(conn *net.TCPConn) (int, int) {
 
 func getRequestMSS(r *http.Request) int {
     // Try to get client's requested MSS from TCP options
-    // This is just informational as it may not be available
     if tcpConn, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPConn); ok {
-        mss, _ := GetTCPMaxSeg(tcpConn.File().Fd())
+        sysConn, err := tcpConn.SyscallConn()
+        if err != nil {
+            return 0
+        }
+        var mss int
+        sysConn.Control(func(fd uintptr) {
+            mss, _ = GetTCPMaxSeg(fd)
+        })
         return mss
     }
     return 0
