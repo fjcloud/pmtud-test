@@ -1,7 +1,7 @@
-// File: main.go
 package main
 
 import (
+    "crypto/tls"
     "fmt"
     "log"
     "net"
@@ -24,6 +24,19 @@ func getMSSInfo(conn *net.TCPConn) int {
     return mss
 }
 
+func getTLSConnection(conn net.Conn) (*net.TCPConn, error) {
+    // Try to get TCP connection from TLS
+    if tlsConn, ok := conn.(*tls.Conn); ok {
+        if err := tlsConn.Handshake(); err != nil {
+            return nil, fmt.Errorf("TLS handshake failed: %v", err)
+        }
+        if tcpConn, ok := tlsConn.NetConn().(*net.TCPConn); ok {
+            return tcpConn, nil
+        }
+    }
+    return nil, fmt.Errorf("not a TLS connection")
+}
+
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
     hijacker, ok := w.(http.Hijacker)
     if !ok {
@@ -38,9 +51,9 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
     }
     defer conn.Close()
 
-    tcpConn, ok := conn.(*net.TCPConn)
-    if !ok {
-        fmt.Fprintf(w, "Not a TCP connection")
+    tcpConn, err := getTLSConnection(conn)
+    if err != nil {
+        fmt.Fprintf(w, "Error getting TCP connection: %v", err)
         return
     }
 
@@ -52,7 +65,7 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
     response := fmt.Sprintf(`HTTP/1.1 200 OK
 Content-Type: text/plain
 
-Connection Information:
+Connection Information (TLS):
 Local Address: %s
 Remote Address: %s
 MSS: %d bytes
@@ -60,6 +73,8 @@ MSS: %d bytes
 Additional Network Information:
 Host: %s
 Client IP: %s
+TLS Version: %s
+Cipher Suite: %s
 Headers: %v
 `, 
         localAddr.String(),
@@ -67,6 +82,8 @@ Headers: %v
         mss,
         r.Host,
         strings.Split(r.RemoteAddr, ":")[0],
+        r.TLS.Version,
+        tls.CipherSuiteName(r.TLS.CipherSuite),
         r.Header)
 
     conn.Write([]byte(response))
@@ -75,13 +92,16 @@ Headers: %v
 func main() {
     port := os.Getenv("PORT")
     if port == "" {
-        port = "8080"
+        port = "8443"
     }
 
     http.HandleFunc("/", connectionHandler)
     
-    log.Printf("Starting server on port %s", port)
-    if err := http.ListenAndServe(":"+port, nil); err != nil {
+    certFile := "/certs/tls.crt"
+    keyFile := "/certs/tls.key"
+
+    log.Printf("Starting HTTPS server on port %s", port)
+    if err := http.ListenAndServeTLS(":"+port, certFile, keyFile, nil); err != nil {
         log.Fatal(err)
     }
 }
