@@ -2,13 +2,23 @@ package main
 
 import (
     "crypto/tls"
+    "encoding/json"
     "fmt"
     "log"
     "net"
     "net/http"
     "os"
-    "strings"
 )
+
+type ConnectionInfo struct {
+    LocalAddress  string `json:"local_address"`
+    RemoteAddress string `json:"remote_address"`
+    MSS           int    `json:"mss"`
+    TLSVersion    string `json:"tls_version"`
+    CipherSuite   string `json:"cipher_suite"`
+    Host          string `json:"host"`
+    ClientIP      string `json:"client_ip"`
+}
 
 func getMSSInfo(conn *net.TCPConn) int {
     sysConn, err := conn.SyscallConn()
@@ -24,69 +34,66 @@ func getMSSInfo(conn *net.TCPConn) int {
     return mss
 }
 
-func getTLSConnection(conn net.Conn) (*net.TCPConn, error) {
-    // Try to get TCP connection from TLS
-    if tlsConn, ok := conn.(*tls.Conn); ok {
-        if err := tlsConn.Handshake(); err != nil {
-            return nil, fmt.Errorf("TLS handshake failed: %v", err)
-        }
-        if tcpConn, ok := tlsConn.NetConn().(*net.TCPConn); ok {
-            return tcpConn, nil
-        }
+func getTCPConnFromRequest(r *http.Request) (*net.TCPConn, error) {
+    if r.TLS == nil {
+        return nil, fmt.Errorf("not a TLS connection")
     }
-    return nil, fmt.Errorf("not a TLS connection")
+
+    // Get the underlying connection
+    conn := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+    if tcpConn, ok := conn.(*net.TCPAddr); ok {
+        return net.DialTCP("tcp", nil, tcpConn)
+    }
+    
+    return nil, fmt.Errorf("could not get TCP connection")
 }
 
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
-    hijacker, ok := w.(http.Hijacker)
-    if !ok {
-        http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-        return
-    }
-    
-    conn, _, err := hijacker.Hijack()
+    tcpConn, err := getTCPConnFromRequest(r)
     if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-    defer conn.Close()
-
-    tcpConn, err := getTLSConnection(conn)
-    if err != nil {
-        fmt.Fprintf(w, "Error getting TCP connection: %v", err)
-        return
+        log.Printf("Error getting TCP connection: %v", err)
+        // Continue anyway to show available information
     }
 
-    mss := getMSSInfo(tcpConn)
-    
-    localAddr := tcpConn.LocalAddr().(*net.TCPAddr)
-    remoteAddr := tcpConn.RemoteAddr().(*net.TCPAddr)
+    // Get MSS if we have a TCP connection
+    var mss int
+    if tcpConn != nil {
+        mss = getMSSInfo(tcpConn)
+        defer tcpConn.Close()
+    }
 
-    response := fmt.Sprintf(`HTTP/1.1 200 OK
-Content-Type: text/plain
+    // Get TLS version string
+    tlsVersionStr := "Unknown"
+    if r.TLS != nil {
+        switch r.TLS.Version {
+        case tls.VersionTLS10:
+            tlsVersionStr = "TLS 1.0"
+        case tls.VersionTLS11:
+            tlsVersionStr = "TLS 1.1"
+        case tls.VersionTLS12:
+            tlsVersionStr = "TLS 1.2"
+        case tls.VersionTLS13:
+            tlsVersionStr = "TLS 1.3"
+        }
+    }
 
-Connection Information (TLS):
-Local Address: %s
-Remote Address: %s
-MSS: %d bytes
+    info := ConnectionInfo{
+        LocalAddress:  r.Host,
+        RemoteAddress: r.RemoteAddr,
+        MSS:          mss,
+        TLSVersion:   tlsVersionStr,
+        CipherSuite:  tls.CipherSuiteName(r.TLS.CipherSuite),
+        Host:         r.Host,
+        ClientIP:     r.RemoteAddr,
+    }
 
-Additional Network Information:
-Host: %s
-Client IP: %s
-TLS Version: %s
-Cipher Suite: %s
-Headers: %v
-`, 
-        localAddr.String(),
-        remoteAddr.String(),
-        mss,
-        r.Host,
-        strings.Split(r.RemoteAddr, ":")[0],
-        r.TLS.Version,
-        tls.CipherSuiteName(r.TLS.CipherSuite),
-        r.Header)
+    // Set headers for CORS and content type
+    w.Header().Set("Content-Type", "application/json")
+    w.Header().Set("Access-Control-Allow-Origin", "*")
+    w.Header().Set("Access-Control-Allow-Methods", "GET")
 
-    conn.Write([]byte(response))
+    // Write JSON response
+    json.NewEncoder(w).Encode(info)
 }
 
 func main() {
