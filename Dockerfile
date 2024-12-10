@@ -10,7 +10,7 @@ COPY . .
 RUN go build -o pmtud-test
 
 # Use minimal RHEL 9 image for runtime
-FROM registry.access.redhat.com/rhel9/ubi-minimal:9.3
+FROM registry.access.redhat.com/ubi-minimal:9.5
 
 # Copy the binary from builder
 COPY --from=builder /opt/app-root/src/pmtud-test /pmtud-test
