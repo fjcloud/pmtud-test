@@ -11,57 +11,56 @@ import (
 )
 
 type ConnectionInfo struct {
-    RemoteAddr    string `json:"remote_addr"`
-    IncomingMSS   int    `json:"incoming_mss"`
-    TLSVersion    string `json:"tls_version"`
-    CipherSuite   string `json:"cipher_suite"`
+    RemoteAddr  string `json:"remote_addr"`
+    IncomingMSS int    `json:"incoming_mss"`
+    TLSVersion string `json:"tls_version"`
+    CipherSuite string `json:"cipher_suite"`
 }
 
-func getMSS(network string, address string) int {
-    tcpAddr, err := net.ResolveTCPAddr(network, address)
-    if err != nil {
-        log.Printf("Error resolving address: %v", err)
-        return 0
+func getTCPConn(w http.ResponseWriter) (*net.TCPConn, error) {
+    if v, ok := w.(interface {
+        Hijack() (net.Conn, *bufio.ReadWriter, error)
+    }); ok {
+        conn, _, err := v.Hijack()
+        if err != nil {
+            return nil, err
+        }
+        if tcpConn, ok := conn.(*net.TCPConn); ok {
+            return tcpConn, nil
+        }
     }
+    return nil, fmt.Errorf("not a TCP connection")
+}
 
-    conn, err := net.DialTCP(network, nil, tcpAddr)
-    if err != nil {
-        log.Printf("Error dialing: %v", err)
-        return 0
-    }
-    defer conn.Close()
-
+func getConnMSS(conn *net.TCPConn) int {
     raw, err := conn.SyscallConn()
     if err != nil {
-        log.Printf("Error getting syscall conn: %v", err)
         return 0
     }
 
     var mss int
     raw.Control(func(fd uintptr) {
         mss, err = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG)
-        if err != nil {
-            log.Printf("Error getting TCP_MAXSEG: %v", err)
-            mss = 0
-        }
     })
-
-    log.Printf("MSS for %s: %d", address, mss)
     return mss
 }
 
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
-    host, _, err := net.SplitHostPort(r.RemoteAddr)
-    if err != nil {
-        log.Printf("Error splitting host port: %v", err)
-        host = r.RemoteAddr
+    tlsConn := r.TLS
+    var mss int
+    
+    if listener, ok := w.(http.Flusher); ok {
+        listener.Flush()
+        if conn := r.Context().Value(http.LocalAddrContextKey).(net.Conn); ok {
+            if tcpConn, ok := conn.(*net.TCPConn); ok {
+                mss = getConnMSS(tcpConn)
+            }
+        }
     }
 
-    incomingMSS := getMSS("tcp", host+":443")
-
     tlsVersionStr := "Unknown"
-    if r.TLS != nil {
-        switch r.TLS.Version {
+    if tlsConn != nil {
+        switch tlsConn.Version {
         case tls.VersionTLS10:
             tlsVersionStr = "TLS 1.0"
         case tls.VersionTLS11:
@@ -74,10 +73,10 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     info := ConnectionInfo{
-        RemoteAddr:    r.RemoteAddr,
-        IncomingMSS:   incomingMSS,
-        TLSVersion:    tlsVersionStr,
-        CipherSuite:   tls.CipherSuiteName(r.TLS.CipherSuite),
+        RemoteAddr:  r.RemoteAddr,
+        IncomingMSS: mss,
+        TLSVersion: tlsVersionStr,
+        CipherSuite: tls.CipherSuiteName(tlsConn.CipherSuite),
     }
 
     w.Header().Set("Content-Type", "application/json")
@@ -85,8 +84,6 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-
     port := os.Getenv("PORT")
     if port == "" {
         port = "8443"
