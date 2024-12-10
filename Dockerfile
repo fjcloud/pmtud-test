@@ -6,8 +6,8 @@ WORKDIR /opt/app-root/src
 # Copy the source code
 COPY . .
 
-# Build the application
-RUN go build -o pmtud-test
+# Build with VCS stamping disabled
+RUN go build -buildvcs=false -o pmtud-test
 
 # Use minimal RHEL 9 image for runtime
 FROM registry.redhat.io/ubi9-minimal:9.5
