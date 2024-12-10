@@ -12,13 +12,12 @@ import (
 
 type ConnectionInfo struct {
     RemoteAddr    string `json:"remote_addr"`
-    IncomingMSS   int    `json:"incoming_mss"`    // MSS value received from client
+    IncomingMSS   int    `json:"incoming_mss"`
     TLSVersion    string `json:"tls_version"`
     CipherSuite   string `json:"cipher_suite"`
 }
 
 func getMSS(network string, address string) int {
-    // Create a temporary connection to get MSS
     tcpAddr, err := net.ResolveTCPAddr(network, address)
     if err != nil {
         log.Printf("Error resolving address: %v", err)
@@ -52,17 +51,14 @@ func getMSS(network string, address string) int {
 }
 
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
-    // Get the remote host without port
     host, _, err := net.SplitHostPort(r.RemoteAddr)
     if err != nil {
         log.Printf("Error splitting host port: %v", err)
         host = r.RemoteAddr
     }
 
-    // Get MSS using a separate connection
     incomingMSS := getMSS("tcp", host+":443")
 
-    // Get TLS version as string
     tlsVersionStr := "Unknown"
     if r.TLS != nil {
         switch r.TLS.Version {
@@ -89,7 +85,6 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-    // Enable debug logging
     log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
     port := os.Getenv("PORT")
@@ -97,10 +92,11 @@ func main() {
         port = "8443"
     }
 
-    http.HandleFunc("/", connectionHandler)
+    mux := http.NewServeMux()
+    mux.HandleFunc("/", connectionHandler)
     
     log.Printf("Starting HTTPS server on port %s", port)
-    if err := http.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key", nil); err != nil {
+    if err := http.ListenAndServeTLS(":"+port, "/certs/tls.crt", "/certs/tls.key", mux); err != nil {
         log.Fatal(err)
     }
 }
