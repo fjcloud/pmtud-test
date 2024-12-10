@@ -7,80 +7,32 @@ import (
     "net"
     "net/http"
     "os"
+    "syscall"
 )
 
 type ConnectionInfo struct {
-    LocalAddress  string `json:"local_address"`
-    RemoteAddress string `json:"remote_address"`
-    MSS           int    `json:"mss"`
-    RequestedMSS  int    `json:"requested_mss,omitempty"`
-    MTU          int    `json:"mtu"`
+    RemoteAddr    string `json:"remote_addr"`
+    IncomingMSS   int    `json:"incoming_mss"`    // MSS value received from client
     TLSVersion    string `json:"tls_version"`
     CipherSuite   string `json:"cipher_suite"`
-    Host          string `json:"host"`
-    ClientIP      string `json:"client_ip"`
 }
 
-func getMSSandMTU(conn *net.TCPConn) (int, int) {
-    sysConn, err := conn.SyscallConn()
-    if err != nil {
-        return 0, 0
-    }
-
-    var mss, mtu int
-    sysConn.Control(func(fd uintptr) {
-        // Get MSS
-        mss, _ = GetTCPMaxSeg(fd)
-        
-        // Try to get interface MTU
-        if iface, err := net.InterfaceByIndex(0); err == nil {
-            mtu = iface.MTU
-        }
-        
-        // Validate MSS
-        if mss <= 0 || mss > 65535 {
-            // Calculate default MSS based on MTU if available
-            if mtu > 0 {
-                mss = mtu - 40  // IPv6 header (40 bytes)
-            } else {
-                mss = 1460      // Default Ethernet MSS
-            }
-        }
-    })
-    
-    return mss, mtu
-}
-
-func getRequestMSS(r *http.Request) int {
-    // Try to get client's requested MSS from TCP options
-    if tcpConn, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPConn); ok {
-        sysConn, err := tcpConn.SyscallConn()
-        if err != nil {
-            return 0
-        }
-        var mss int
-        sysConn.Control(func(fd uintptr) {
-            mss, _ = GetTCPMaxSeg(fd)
-        })
-        return mss
-    }
-    return 0
+func getTCPMaxSegSize(fd uintptr) (int, error) {
+    return syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG)
 }
 
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
-    var mss, mtu int
-    var requestedMSS int
-    
-    // Get connection details
-    if tcpConn, err := net.Dial("tcp", r.Host); err == nil {
-        mss, mtu = getMSSandMTU(tcpConn.(*net.TCPConn))
-        tcpConn.Close()
+    // Get the TCP connection info
+    var incomingMSS int
+    if tcpConn, ok := r.Context().Value(http.LocalAddrContextKey).(interface{ SyscallConn() (syscall.RawConn, error) }); ok {
+        if sysConn, err := tcpConn.SyscallConn(); err == nil {
+            sysConn.Control(func(fd uintptr) {
+                incomingMSS, _ = getTCPMaxSegSize(fd)
+            })
+        }
     }
-    
-    // Try to get client's requested MSS
-    requestedMSS = getRequestMSS(r)
 
-    // Get TLS version string
+    // Get TLS version as string
     tlsVersionStr := "Unknown"
     if r.TLS != nil {
         switch r.TLS.Version {
@@ -96,21 +48,13 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     info := ConnectionInfo{
-        LocalAddress:  r.Host,
-        RemoteAddress: r.RemoteAddr,
-        MSS:          mss,
-        RequestedMSS: requestedMSS,
-        MTU:          mtu,
-        TLSVersion:   tlsVersionStr,
-        CipherSuite:  tls.CipherSuiteName(r.TLS.CipherSuite),
-        Host:         r.Host,
-        ClientIP:     r.RemoteAddr,
+        RemoteAddr:    r.RemoteAddr,
+        IncomingMSS:   incomingMSS,
+        TLSVersion:    tlsVersionStr,
+        CipherSuite:   tls.CipherSuiteName(r.TLS.CipherSuite),
     }
 
     w.Header().Set("Content-Type", "application/json")
-    w.Header().Set("Access-Control-Allow-Origin", "*")
-    w.Header().Set("Access-Control-Allow-Methods", "GET")
-
     json.NewEncoder(w).Encode(info)
 }
 
