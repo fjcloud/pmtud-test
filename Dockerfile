@@ -3,9 +3,6 @@ FROM registry.redhat.io/ubi9/go-toolset:1.22.7 as builder
 USER 0
 WORKDIR /opt/app-root/src
 
-# Install OpenSSL
-RUN dnf install -y openssl
-
 # Generate self-signed certificate
 RUN mkdir -p /certs && \
     openssl req -x509 \
