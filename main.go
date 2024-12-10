@@ -1,3 +1,4 @@
+// File: main.go
 package main
 
 import (
@@ -17,15 +18,13 @@ func getMSSInfo(conn *net.TCPConn) int {
 
     var mss int
     sysConn.Control(func(fd uintptr) {
-        // Get TCP_MAXSEG using syscall
-        mss, _ = getTCPMaxSegSize(fd)
+        mss, _ = GetTCPMaxSeg(fd)
     })
     
     return mss
 }
 
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
-    // Get the underlying TCP connection
     hijacker, ok := w.(http.Hijacker)
     if !ok {
         http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
@@ -45,14 +44,11 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Get MSS information
     mss := getMSSInfo(tcpConn)
     
-    // Get connection details
     localAddr := tcpConn.LocalAddr().(*net.TCPAddr)
     remoteAddr := tcpConn.RemoteAddr().(*net.TCPAddr)
 
-    // Prepare response
     response := fmt.Sprintf(`HTTP/1.1 200 OK
 Content-Type: text/plain
 
@@ -77,7 +73,6 @@ Headers: %v
 }
 
 func main() {
-    // Get port from environment variable or use default
     port := os.Getenv("PORT")
     if port == "" {
         port = "8080"
