@@ -4,6 +4,7 @@ import (
     "crypto/tls"
     "encoding/json"
     "log"
+    "net"
     "net/http"
     "os"
     "syscall"
@@ -16,18 +17,36 @@ type ConnectionInfo struct {
     CipherSuite   string `json:"cipher_suite"`
 }
 
-func getTCPMaxSegSize(fd uintptr) (int, error) {
-    return syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG)
+func getMSS(conn *net.TCPConn) int {
+    raw, err := conn.SyscallConn()
+    if err != nil {
+        log.Printf("Error getting syscall conn: %v", err)
+        return 0
+    }
+
+    var mss int
+    raw.Control(func(fd uintptr) {
+        mss, err = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG)
+        if err != nil {
+            log.Printf("Error getting TCP_MAXSEG: %v", err)
+            mss = 0
+        }
+    })
+    return mss
 }
 
 func connectionHandler(w http.ResponseWriter, r *http.Request) {
-    // Get the TCP connection info
     var incomingMSS int
-    if tcpConn, ok := r.Context().Value(http.LocalAddrContextKey).(interface{ SyscallConn() (syscall.RawConn, error) }); ok {
-        if sysConn, err := tcpConn.SyscallConn(); err == nil {
-            sysConn.Control(func(fd uintptr) {
-                incomingMSS, _ = getTCPMaxSegSize(fd)
-            })
+
+    // Try to get the underlying TCP connection
+    hj, ok := w.(http.Hijacker)
+    if ok {
+        conn, _, err := hj.Hijack()
+        if err == nil {
+            if tcpConn, ok := conn.(*net.TCPConn); ok {
+                incomingMSS = getMSS(tcpConn)
+                // Don't close the connection here as we need it for the response
+            }
         }
     }
 
@@ -53,23 +72,32 @@ func connectionHandler(w http.ResponseWriter, r *http.Request) {
         CipherSuite:   tls.CipherSuiteName(r.TLS.CipherSuite),
     }
 
+    // Log for debugging
+    log.Printf("Connection from %s, MSS: %d", r.RemoteAddr, incomingMSS)
+
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(info)
 }
 
 func main() {
+    // Enable debug logging
+    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+
     port := os.Getenv("PORT")
     if port == "" {
         port = "8443"
     }
 
-    http.HandleFunc("/", connectionHandler)
-    
-    certFile := "/certs/tls.crt"
-    keyFile := "/certs/tls.key"
+    server := &http.Server{
+        Addr: ":" + port,
+        Handler: http.HandlerFunc(connectionHandler),
+        TLSConfig: &tls.Config{
+            MinVersion: tls.VersionTLS12,
+        },
+    }
 
     log.Printf("Starting HTTPS server on port %s", port)
-    if err := http.ListenAndServeTLS(":"+port, certFile, keyFile, nil); err != nil {
+    if err := server.ListenAndServeTLS("/certs/tls.crt", "/certs/tls.key"); err != nil {
         log.Fatal(err)
     }
 }
